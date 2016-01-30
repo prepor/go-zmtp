@@ -116,7 +116,28 @@ func (self *Listener) Error() error {
 	return err
 }
 
-// func (self *Socket) Send
+func (self *Socket) Send(frames ...interface{}) {
+	var msg [][]byte
+	for _, v := range frames {
+		switch t := v.(type) {
+		case []byte:
+			msg = append(msg, t)
+		case [][]byte:
+			msg = append(msg, t...)
+		case string:
+			msg = append(msg, []byte(t))
+		case []string:
+			strings := make([][]byte, len(t))
+			for i, s := range t {
+				strings[i] = []byte(s)
+			}
+			msg = append(msg, strings...)
+		default:
+			msg = append(msg, []byte(fmt.Sprintf("%v", t)))
+		}
+	}
+	self.writeChannel <- msg
+}
 
 func (self *Socket) prepare() error {
 	if err := self.sendGreeting(); err != nil {

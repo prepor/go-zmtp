@@ -15,6 +15,44 @@ func TestClient(t *testing.T) {
 }
 
 func TestListener(t *testing.T) {
+	pingServer(t)
+	pingTest(t)
+}
+
+func TestSend(t *testing.T) {
+	pingServer(t)
+	socket, err := Connect(&SocketConfig{
+		Type:     REQ,
+		Endpoint: "127.0.0.1:31337",
+	})
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	read, _ := socket.Channels()
+	socket.Send("Hello", [][]byte{[]byte(" "), []byte("World")}, []string{"!", "!"}, 1)
+	expect := [][]byte{[]byte("Hello"), []byte(" "), []byte("World"), []byte("!"), []byte("!"), []byte("1")}
+	assert.Equal(t, expect, <-read)
+	socket.Close()
+}
+
+func pingTest(t *testing.T) {
+	socket, err := Connect(&SocketConfig{
+		Type:     REQ,
+		Endpoint: "127.0.0.1:31337",
+	})
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	read, write := socket.Channels()
+	write <- [][]byte{[]byte(""), []byte("Hello!")}
+	response := <-read
+	assert.Equal(t, "Hello!", string(response[1]))
+	socket.Close()
+}
+
+func pingServer(t *testing.T) {
 	listener, err := Listen(&SocketConfig{
 		Type:     REP,
 		Endpoint: "127.0.0.1:31337",
@@ -34,21 +72,4 @@ func TestListener(t *testing.T) {
 		write <- v
 		listener.Close()
 	}()
-	pingTest(t)
-}
-
-func pingTest(t *testing.T) {
-	socket, err := Connect(&SocketConfig{
-		Type:     REQ,
-		Endpoint: "127.0.0.1:31337",
-	})
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	read, write := socket.Channels()
-	write <- [][]byte{[]byte(""), []byte("Hello!")}
-	response := <-read
-	assert.Equal(t, "Hello!", string(response[1]))
-	socket.Close()
 }
