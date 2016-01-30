@@ -189,7 +189,9 @@ func (self *Socket) recvGreeting() error {
 	self.otherIdentity = otherIdentity
 	self.otherSocketType = SocketType(greeting.SocketType)
 
-	// fixme check socket types
+	if !IsSocketTypesCompatible(self.otherSocketType, self.t) {
+		return fmt.Errorf("Socket type %v is not compatible with %v", self.otherSocketType, self.t)
+	}
 	return nil
 }
 
@@ -398,4 +400,54 @@ func socketFromConnection(conn *net.TCPConn, config *SocketConfig) (*Socket, err
 	}
 	s.startChannels(config)
 	return s, nil
+}
+
+func (self SocketType) String() string {
+	switch self {
+	default:
+		return "UNKNOWN"
+	case PAIR:
+		return "PAIR"
+	case PUB:
+		return "PUB"
+	case SUB:
+		return "SUB"
+	case REQ:
+		return "REQ"
+	case REP:
+		return "REP"
+	case DEALER:
+		return "DEALER"
+	case ROUTER:
+		return "ROUTER"
+	case PULL:
+		return "PULL"
+	case PUSH:
+		return "PUSH"
+	}
+}
+
+func IsSocketTypesCompatible(one SocketType, another SocketType) bool {
+	switch one {
+	default:
+		return false
+	case PAIR:
+		return another == PAIR
+	case PUB:
+		return another == SUB
+	case SUB:
+		return another == PUB
+	case REQ:
+		return another == REP || another == ROUTER
+	case REP:
+		return another == REQ || another == DEALER
+	case DEALER:
+		return another == REP || another == DEALER || another == ROUTER
+	case ROUTER:
+		return another == REQ || another == DEALER || another == ROUTER
+	case PULL:
+		return another == PUSH
+	case PUSH:
+		return another == PULL
+	}
 }
