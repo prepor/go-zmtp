@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/prepor/zmtp/internal/test"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestClient(t *testing.T) {
@@ -25,15 +25,21 @@ func TestSend(t *testing.T) {
 		Type:     REQ,
 		Endpoint: "127.0.0.1:31337",
 	})
-	if err != nil {
-		t.Error(err)
-		return
-	}
+	require.NoError(t, err)
 	read, _ := socket.Channels()
 	socket.Send("Hello", [][]byte{[]byte(" "), []byte("World")}, []string{"!", "!"}, 1)
 	expect := [][]byte{[]byte("Hello"), []byte(" "), []byte("World"), []byte("!"), []byte("!"), []byte("1")}
-	assert.Equal(t, expect, <-read)
+	require.Equal(t, expect, <-read)
 	socket.Close()
+}
+
+func TestCompatibility(t *testing.T) {
+	pingServer(t)
+	_, err := Connect(&SocketConfig{
+		Type:     REP,
+		Endpoint: "127.0.0.1:31337",
+	})
+	require.Error(t, err)
 }
 
 func pingTest(t *testing.T) {
@@ -41,14 +47,12 @@ func pingTest(t *testing.T) {
 		Type:     REQ,
 		Endpoint: "127.0.0.1:31337",
 	})
-	if err != nil {
-		t.Error(err)
-		return
-	}
+	require.NoError(t, err)
+
 	read, write := socket.Channels()
 	write <- [][]byte{[]byte(""), []byte("Hello!")}
 	response := <-read
-	assert.Equal(t, "Hello!", string(response[1]))
+	require.Equal(t, "Hello!", string(response[1]))
 	socket.Close()
 }
 
@@ -57,10 +61,8 @@ func pingServer(t *testing.T) {
 		Type:     REP,
 		Endpoint: "127.0.0.1:31337",
 	})
-	if err != nil {
-		t.Error(err)
-		return
-	}
+	require.NoError(t, err)
+
 	go func() {
 		acc := <-listener.Accept()
 		if acc.err != nil {
