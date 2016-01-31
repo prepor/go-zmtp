@@ -26,7 +26,7 @@ func TestSend(t *testing.T) {
 		Endpoint: "127.0.0.1:31337",
 	})
 	require.NoError(t, err)
-	read, _ := socket.Channels()
+	read := socket.Read()
 	socket.Send("Hello", [][]byte{[]byte(" "), []byte("World")}, []string{"!", "!"}, 1)
 	expect := [][]byte{[]byte("Hello"), []byte(" "), []byte("World"), []byte("!"), []byte("!"), []byte("1")}
 	require.Equal(t, expect, <-read)
@@ -49,8 +49,8 @@ func pingTest(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	read, write := socket.Channels()
-	write <- [][]byte{[]byte(""), []byte("Hello!")}
+	read := socket.Read()
+	socket.Send("", "Hello!")
 	response := <-read
 	require.Equal(t, "Hello!", string(response[1]))
 	socket.Close()
@@ -65,13 +65,13 @@ func pingServer(t *testing.T) {
 
 	go func() {
 		acc := <-listener.Accept()
-		if acc.err != nil {
-			t.Error(acc.err)
+		if acc.Err != nil {
+			t.Error(acc.Err)
 			return
 		}
-		read, write := acc.socket.Channels()
+		read := acc.Socket.Read()
 		v := <-read
-		write <- v
+		acc.Socket.Send(v)
 		listener.Close()
 	}()
 }

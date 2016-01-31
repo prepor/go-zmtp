@@ -1,6 +1,7 @@
 package zmtp
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 type SocketType uint8
 
 type ReadChannel <-chan [][]byte
-type WriteChannel chan<- [][]byte
 type AcceptChannel <-chan Accept
 
 const (
@@ -46,6 +46,9 @@ type Socket struct {
 	waiter          sync.WaitGroup
 	errorMutex      sync.Mutex
 	error           error
+
+	writeBuf *bufio.Writer
+	readBuf  *bufio.Reader
 }
 
 type Listener struct {
@@ -57,15 +60,14 @@ type Listener struct {
 }
 
 type Accept struct {
-	err    error
-	socket *Socket
+	Err    error
+	Socket *Socket
+	Addr   net.Addr
 }
 
 type SocketConfig struct {
-	Type         SocketType
-	Endpoint     string
-	ReadChannel  chan [][]byte
-	WriteChannel chan [][]byte
+	Type     SocketType
+	Endpoint string
 }
 
 func Connect(config *SocketConfig) (*Socket, error) {
@@ -88,18 +90,32 @@ func (self *Listener) Accept() AcceptChannel {
 	return self.acceptChannel
 }
 
-func (self *Socket) Channels() (ReadChannel, WriteChannel) {
-	return self.readChannel, self.writeChannel
+func (self *Socket) Read() ReadChannel {
+	return self.readChannel
 }
 
-func (self *Socket) Close() {
-	close(self.writeChannel)
+func (self *Socket) Close() (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("%v", v)
+			return
+		}
+	}()
+	self.conn.Close()
 	self.waiter.Wait()
+	return nil
 }
 
-func (self *Listener) Close() {
+func (self *Listener) Close() (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("%v", v)
+			return
+		}
+	}()
 	self.listener.Close()
 	self.waiter.Wait()
+	return nil
 }
 
 func (self *Socket) Error() error {
@@ -116,7 +132,13 @@ func (self *Listener) Error() error {
 	return err
 }
 
-func (self *Socket) Send(frames ...interface{}) {
+func (self *Socket) Send(frames ...interface{}) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("%v", v)
+			return
+		}
+	}()
 	var msg [][]byte
 	for _, v := range frames {
 		switch t := v.(type) {
@@ -137,6 +159,7 @@ func (self *Socket) Send(frames ...interface{}) {
 		}
 	}
 	self.writeChannel <- msg
+	return nil
 }
 
 func (self *Socket) prepare() error {
@@ -178,20 +201,21 @@ func (self *Socket) sendGreeting() error {
 		FinalShort:      finalShort,
 		IdentitySize:    identitySize,
 	}
-	if err := binary.Write(self.conn, byteOrder, &greeting); err != nil {
+	if err := binary.Write(self.writeBuf, byteOrder, &greeting); err != nil {
 		return err
 	}
-	if _, err := self.conn.Write(identity[:]); err != nil {
+	if _, err := self.writeBuf.Write(identity[:]); err != nil {
 		return err
 	}
 	self.identity = identity[:]
+	self.writeBuf.Flush()
 	return nil
 }
 
 func (self *Socket) recvGreeting() error {
 	var greeting greeting
 
-	if err := binary.Read(self.conn, byteOrder, &greeting); err != nil {
+	if err := binary.Read(self.readBuf, byteOrder, &greeting); err != nil {
 		return fmt.Errorf("Error while reading: %v", err)
 	}
 
@@ -204,7 +228,7 @@ func (self *Socket) recvGreeting() error {
 	}
 
 	otherIdentity := make([]byte, greeting.IdentitySize)
-	if _, err := io.ReadFull(self.conn, otherIdentity); err != nil {
+	if _, err := io.ReadFull(self.readBuf, otherIdentity); err != nil {
 		return err
 	}
 	self.otherIdentity = otherIdentity
@@ -220,23 +244,15 @@ const readChannelBuffer = 10
 const writeChannelBuffer = 10
 
 func (self *Socket) startChannels(config *SocketConfig) {
-	if config.WriteChannel == nil {
-		self.writeChannel = make(chan [][]byte, writeChannelBuffer)
-	} else {
-		self.writeChannel = config.WriteChannel
-	}
-	if config.ReadChannel == nil {
-		self.readChannel = make(chan [][]byte, readChannelBuffer)
-	} else {
-		self.readChannel = config.ReadChannel
-	}
+	self.writeChannel = make(chan [][]byte, writeChannelBuffer)
+	self.readChannel = make(chan [][]byte, readChannelBuffer)
+
 	go self.startReadChannel()
 	go self.startWriteChannel()
 }
 
 func (self *Socket) startWriteChannel() {
 	self.waiter.Add(1)
-	defer self.conn.Close()
 	defer self.waiter.Done()
 	var err error
 	for v := range self.writeChannel {
@@ -250,40 +266,28 @@ func (self *Socket) startWriteChannel() {
 	}
 }
 
-func safeClose(ch chan [][]byte) (err error) {
-	defer func() {
-		if err := recover(); err != nil {
-			return
-		}
-	}()
-
-	close(ch)
-	return nil
-}
-
 func (self *Socket) startReadChannel() {
 	self.waiter.Add(1)
-	defer safeClose(self.writeChannel)
 	defer close(self.readChannel)
+	defer close(self.writeChannel)
 	defer self.waiter.Done()
-	var err error
-	var frame []byte
-	var isLast bool
-	msg := make([][]byte, 0, 3)
-	len := 0
 	for {
-		if frame, isLast, err = self.readFrame(); err != nil {
-			self.error = err
-			return
+		msg := make([][]byte, 0, 3)
+		for {
+			frame, isLast, err := self.readFrame()
+			if err != nil {
+				self.error = err
+				return
+			}
+			if isLast {
+				msg = append(msg, frame)
+				self.readChannel <- msg
+				break
+			} else {
+				msg = append(msg, frame)
+			}
 		}
-		len += 1
-		if isLast {
-			msg = append(msg, frame)
-			self.readChannel <- msg
-			msg = make([][]byte, 0, 3)
-		} else {
-			msg = append(msg, frame)
-		}
+
 	}
 }
 
@@ -297,6 +301,7 @@ func (self *Socket) send(msg [][]byte) error {
 			return err
 		}
 	}
+	self.writeBuf.Flush()
 	return nil
 }
 
@@ -318,19 +323,19 @@ func (self *Socket) sendFrame(body []byte, isLast bool) error {
 		}
 	}
 
-	if err := binary.Write(self.conn, byteOrder, mark); err != nil {
+	if err := binary.Write(self.writeBuf, byteOrder, mark); err != nil {
 		return err
 	}
 	if isLong {
-		if err := binary.Write(self.conn, byteOrder, int64(length)); err != nil {
+		if err := binary.Write(self.writeBuf, byteOrder, int64(length)); err != nil {
 			return err
 		}
 	} else {
-		if err := binary.Write(self.conn, byteOrder, uint8(length)); err != nil {
+		if err := binary.Write(self.writeBuf, byteOrder, uint8(length)); err != nil {
 			return err
 		}
 	}
-	if _, err := self.conn.Write(body); err != nil {
+	if _, err := self.writeBuf.Write(body); err != nil {
 		return err
 	}
 	return nil
@@ -340,7 +345,7 @@ func (self *Socket) readFrame() ([]byte, bool, error) {
 	var header [2]byte
 	var longLength [4]byte
 	isLast := true
-	if _, err := io.ReadFull(self.conn, header[:]); err != nil {
+	if _, err := io.ReadFull(self.readBuf, header[:]); err != nil {
 		return nil, true, err
 	}
 	if header[0] == moreLong || header[0] == moreShort {
@@ -349,14 +354,14 @@ func (self *Socket) readFrame() ([]byte, bool, error) {
 	bodyLength := uint64(0)
 	if header[0] == finalLong || header[0] == moreLong {
 		longLength[0] = header[1]
-		if _, err := io.ReadFull(self.conn, longLength[1:]); err != nil {
+		if _, err := io.ReadFull(self.readBuf, longLength[1:]); err != nil {
 			return nil, true, err
 		}
 	} else {
 		bodyLength = uint64(header[1])
 	}
 	body := make([]byte, bodyLength)
-	if _, err := io.ReadFull(self.conn, body); err != nil {
+	if _, err := io.ReadFull(self.readBuf, body); err != nil {
 		return nil, true, err
 	}
 	return body, isLast, nil
@@ -403,17 +408,19 @@ func (self *Listener) start(config *SocketConfig) {
 		}
 		socket, err := socketFromConnection(conn, config)
 		if err != nil {
-			self.acceptChannel <- Accept{err: err}
+			self.acceptChannel <- Accept{Err: err}
 		} else {
-			self.acceptChannel <- Accept{socket: socket}
+			self.acceptChannel <- Accept{Socket: socket, Addr: conn.RemoteAddr()}
 		}
 	}
 }
 
 func socketFromConnection(conn *net.TCPConn, config *SocketConfig) (*Socket, error) {
 	s := &Socket{
-		t:    config.Type,
-		conn: conn,
+		t:        config.Type,
+		conn:     conn,
+		writeBuf: bufio.NewWriter(conn),
+		readBuf:  bufio.NewReader(conn),
 	}
 	err := s.prepare()
 	if err != nil {
